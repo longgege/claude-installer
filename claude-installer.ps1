@@ -18,7 +18,6 @@
     .\claude-installer.ps1 -v "1.2.3"
     .\claude-installer.ps1 -t "D:\tools\claude"
     .\claude-installer.ps1 -p -c
-    irm https://your-server/claude-installer.ps1 | iex
 
 .NOTES
     Supports Windows 10/11, x64 and ARM64 architectures
