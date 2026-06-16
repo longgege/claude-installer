@@ -487,13 +487,20 @@ if (-not (Test-Path $targetDir)) {
 # Download path in TEMP directory
 $zipPattern = "claude-win32-$archSuffix-$version*.zip"
 
-# Find valid cached file (optimize: sort first, then validate only top candidates)
-$validCache = Get-ChildItem -Path $env:TEMP -Filter $zipPattern -ErrorAction SilentlyContinue |
+# Find valid cached file (PowerShell 5.1 compatible)
+$validCache = $null
+$candidates = Get-ChildItem -Path $env:TEMP -Filter $zipPattern -ErrorAction SilentlyContinue |
               Where-Object { $_.Length -gt 1048576 } |
               Sort-Object LastWriteTime -Descending |
-              Select-Object -First 3 |  # Only check top 3 newest files
-              Where-Object { Test-ZipValid -ZipPath $_.FullName } |
-              Select-Object -First 1
+              Select-Object -First 3
+
+# Validate candidates in a loop (avoid function call in pipeline for PS 5.1 compatibility)
+foreach ($candidate in $candidates) {
+    if (Test-ZipValid -ZipPath $candidate.FullName) {
+        $validCache = $candidate
+        break
+    }
+}
 
 $skipDownload = $false
 $zipPath = Join-Path $env:TEMP "claude-win32-$archSuffix-$version.zip"
