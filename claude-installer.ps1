@@ -294,7 +294,7 @@ function Invoke-WebRequestWithFallback {
     while ($attempt -lt $maxAttempts) {
         $actualUri = Build-Url -Url $Uri
         if ($OutFile) {
-            Write-Host "下载地址: $actualUri" -ForegroundColor Gray
+            Write-Host "下载: $actualUri" -ForegroundColor Yellow
         }
         try {
             if ($OutFile) {
@@ -501,7 +501,7 @@ $zipPath = Join-Path $env:TEMP "claude-win32-$archSuffix-$version.zip"
 if ($validCache) {
     $skipDownload = $true
     $zipPath = $validCache.FullName
-    Write-Host "使用缓存: $($validCache.Name)" -ForegroundColor Gray
+    Write-Host "使用缓存: $zipPath" -ForegroundColor Gray
 } elseif (Test-Path $zipPath) {
     try { Remove-Item $zipPath -Force -ErrorAction Stop } catch {
         $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -511,10 +511,8 @@ if ($validCache) {
 
 # Download if not cached
 if (-not $skipDownload) {
-    Write-Host "下载: v$targetVersionNum..." -ForegroundColor Yellow
-
     try {
-        Invoke-WebRequestWithFallback -Uri $baseUrl -OutFile $zipPath
+        $null = Invoke-WebRequestWithFallback -Uri $baseUrl -OutFile $zipPath
 
         # Validate downloaded ZIP file
         $zipValid = Test-ZipValid -ZipPath $zipPath
@@ -548,9 +546,6 @@ if ($fileLocked) {
 解决方案：
   1. 关闭 Claude Code（按 Ctrl+C 或关闭终端）
   2. 重新运行此脚本 - 将自动使用缓存文件
-
-已保留缓存文件：
-  ZIP：$zipPath
 
 "@ -ForegroundColor Yellow
     exit 0
