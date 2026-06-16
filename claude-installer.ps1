@@ -374,24 +374,15 @@ function Test-FileLocked {
     }
 }
 
-# Helper: Validate ZIP file integrity
+# Helper: Validate ZIP file by checking size (simple and efficient)
 function Test-ZipValid {
     param([string]$ZipPath)
 
     if (-not (Test-Path $ZipPath)) { return $false }
 
-    $stream = $null
-    $zip = $null
-    try {
-        $stream = [System.IO.File]::OpenRead($ZipPath)
-        $zip = New-Object System.IO.Compression.ZipArchive($stream, 'Read')
-        return $zip.Entries.Count -gt 0
-    } catch {
-        return $false
-    } finally {
-        if ($zip) { $zip.Dispose() }
-        if ($stream) { $stream.Close(); $stream.Dispose() }
-    }
+    $file = Get-Item $ZipPath -ErrorAction SilentlyContinue
+    # Check if file size > 20MB (minimum valid size threshold)
+    return $file -and $file.Length -gt 20971520
 }
 
 # Determine if user specified version manually
@@ -490,7 +481,7 @@ $zipPattern = "claude-win32-$archSuffix-$version*.zip"
 # Find valid cached file (PowerShell 5.1 compatible)
 $validCache = $null
 $candidates = Get-ChildItem -Path $env:TEMP -Filter $zipPattern -ErrorAction SilentlyContinue |
-              Where-Object { $_.Length -gt 1048576 } |
+              Where-Object { $_.Length -gt 20971520 } |
               Sort-Object LastWriteTime -Descending |
               Select-Object -First 3
 
@@ -562,8 +553,17 @@ try {
     Expand-Archive -Path $zipPath -DestinationPath $targetDir -Force
     Remove-CachedZips -Pattern $zipPattern
 } catch {
-    Write-Host "解压失败: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "ZIP 已保留: $zipPath，关闭 Claude 后重试" -ForegroundColor Yellow
+    Write-Host @"
+
+解压失败: 缓存文件可能损坏
+
+解决方案：
+  1. 删除损坏的缓存文件:
+     Remove-Item "$zipPath" -Force
+
+  2. 重新运行脚本重新下载
+
+"@ -ForegroundColor Red
     exit 1
 }
 
