@@ -313,7 +313,7 @@ function Invoke-WebRequestWithFallback {
                     Write-Host "切换代理: $($proxyPool[$currentProxyIndex])" -ForegroundColor Yellow
                 }
             } else {
-                throw "下载失败: $($_.Exception.Message)"
+                throw $_.Exception.Message
             }
         }
     }
