@@ -460,16 +460,6 @@ if ($currentInstalled) {
 # Build download URL (base URL without proxy prefix)
 $baseUrl = "https://github.com/anthropics/claude-code/releases/download/$version/claude-win32-$archSuffix.zip"
 
-# Find fastest proxy before download
-# Only test when: proxy enabled AND multiple built-in proxies AND no custom proxy specified
-# When user specifies -proxy-url, they've already chosen a proxy - no need to test
-if ($proxy -and $proxyPool.Count -gt 1 -and [string]::IsNullOrEmpty($proxyUrl)) {
-    $currentProxyIndex = Find-FastestProxyIndex -Proxies $proxyPool -TestUrl $baseUrl -TimeoutMs $speedTestTimeout
-} else {
-    # Reset proxy index for download attempt
-    $currentProxyIndex = 0
-}
-
 # Create target directory
 if (-not (Test-Path $targetDir)) {
     New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
@@ -505,6 +495,15 @@ if ($validCache) {
         $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
         $zipPath = Join-Path $env:TEMP "claude-win32-$archSuffix-$version-$timestamp.zip"
     }
+}
+
+# Test proxy speed only if we need to download
+# Only test when: proxy enabled AND multiple built-in proxies AND no custom proxy specified AND no valid cache
+if (-not $skipDownload -and $proxy -and $proxyPool.Count -gt 1 -and [string]::IsNullOrEmpty($proxyUrl)) {
+    $currentProxyIndex = Find-FastestProxyIndex -Proxies $proxyPool -TestUrl $baseUrl -TimeoutMs $speedTestTimeout
+} else {
+    # Reset proxy index for download attempt
+    $currentProxyIndex = 0
 }
 
 # Download if not cached
