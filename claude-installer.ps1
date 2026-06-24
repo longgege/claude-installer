@@ -105,6 +105,13 @@ Claude Code 原生版本安装器（Windows）
     exit 0
 }
 
+# Color scheme
+$ColorInfo    = "Cyan"
+$ColorSuccess = "Green"
+$ColorWarning = "Yellow"
+$ColorError   = "Red"
+$ColorDim     = "Gray"
+
 $ErrorActionPreference = "Stop"
 
 # Proxy pool - will rotate through these if one fails
@@ -120,7 +127,13 @@ $currentProxyIndex = 0
 # Speed test timeout (milliseconds)
 $speedTestTimeout = 8000
 
-# Helper: Test proxy speed using GET request (concurrent testing)
+<#
+.SYNOPSIS
+    Test proxy speed using concurrent GET requests
+.DESCRIPTION
+    Tests all proxies concurrently and returns the index of the fastest one.
+    Uses background jobs to measure connection latency.
+#>
 function Find-FastestProxyIndex {
     param(
         [string[]]$Proxies,
@@ -128,7 +141,7 @@ function Find-FastestProxyIndex {
         [int]$TimeoutMs
     )
 
-    Write-Host "测试代理速度 ($($Proxies.Count) 个代理)..." -ForegroundColor Cyan
+    Write-Host "测试代理速度 ($($Proxies.Count) 个代理)..." -ForegroundColor $ColorInfo
 
     # Create background jobs for concurrent testing
     $jobs = @()
@@ -189,12 +202,12 @@ function Find-FastestProxyIndex {
 
     if ($validResults.Count -gt 0) {
         $fastest = $validResults | Sort-Object -Property Latency | Select-Object -First 1
-        Write-Host "最快代理: $($fastest.Proxy) ($($fastest.Latency)ms)" -ForegroundColor Green
+        Write-Host "最快代理: $($fastest.Proxy) ($($fastest.Latency)ms)" -ForegroundColor $ColorSuccess
 
         # Display all results for transparency
         $sorted = $validResults | Sort-Object -Property Latency
         $sorted | ForEach-Object {
-            $color = if ($_.Proxy -eq $fastest.Proxy) { "Green" } else { "Gray" }
+            $color = if ($_.Proxy -eq $fastest.Proxy) { $ColorSuccess } else { $ColorDim }
             Write-Host "  $($_.Proxy): $($_.Latency)ms" -ForegroundColor $color
         }
 
@@ -202,7 +215,7 @@ function Find-FastestProxyIndex {
     }
 
     # All proxies failed - use first as fallback
-    Write-Host "警告: 所有代理测试超时，使用第一个代理" -ForegroundColor Yellow
+    Write-Host "警告: 所有代理测试超时，使用第一个代理" -ForegroundColor $ColorWarning
     return 0
 }
 
@@ -210,7 +223,7 @@ function Find-FastestProxyIndex {
 if ($proxyUrl -ne "") {
     # Validate proxy URL format
     if ($proxyUrl -notmatch '^https?://') {
-        Write-Host "警告：代理 URL 应以 http:// 或 https:// 开头" -ForegroundColor Yellow
+        Write-Host "警告：代理 URL 应以 http:// 或 https:// 开头" -ForegroundColor $ColorWarning
         $proxyUrl = "https://$proxyUrl"
     }
 
@@ -229,15 +242,17 @@ if ($proxyUrl -ne "") {
     }
 }
 
-# Detect architecture
-$arch = [Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITECTURE', 'Machine')
-if ($arch -eq "AMD64") {
-    $archSuffix = "x64"
-} elseif ($arch -eq "ARM64") {
+# Check for 32-bit Windows (reject WOW64)
+if (-not [Environment]::Is64BitProcess) {
+    Write-Host "不支持 32-bit Windows，请使用 64 位 Windows" -ForegroundColor $ColorError
+    exit 1
+}
+
+# Use native ARM64 binary on ARM64 Windows, x64 otherwise
+if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
     $archSuffix = "arm64"
 } else {
-    Write-Host "不支持的架构：$arch" -ForegroundColor Red
-    exit 1
+    $archSuffix = "x64"
 }
 
 # Set target directory
@@ -246,71 +261,59 @@ if ([string]::IsNullOrEmpty($targetDir)) {
 }
 
 # Display configuration
-Write-Host "架构: $archSuffix | 安装目录: $targetDir" -ForegroundColor Cyan
+Write-Host "架构: $archSuffix | 安装目录: $targetDir" -ForegroundColor $ColorInfo
 if ($proxy) {
     if ($proxyUrl -ne "") {
-        Write-Host "代理: 用户指定 ($proxyUrl)" -ForegroundColor Cyan
+        Write-Host "代理: 用户指定 ($proxyUrl)" -ForegroundColor $ColorInfo
     } elseif ($proxyPool.Count -gt 1) {
-        Write-Host "代理: 已启用 (将测试 $($proxyPool.Count) 个代理)" -ForegroundColor Cyan
+        Write-Host "代理: 已启用 (将测试 $($proxyPool.Count) 个代理)" -ForegroundColor $ColorInfo
     } else {
-        Write-Host "代理: 已启用" -ForegroundColor Cyan
+        Write-Host "代理: 已启用" -ForegroundColor $ColorInfo
     }
 }
 
-# Helper: Build URL with current proxy
+<#
+.SYNOPSIS
+    Build URL with current proxy prefix
+.DESCRIPTION
+    Prepends the current proxy URL to the given URL if proxy mode is enabled.
+    Returns the original URL unchanged if proxy mode is off.
+#>
 function Build-Url {
     param([string]$Url)
     if ($proxy) { return "$($proxyPool[$currentProxyIndex])$Url" }
     return $Url
 }
 
-# Helper: Web request with proxy pool fallback
-function Invoke-WebRequestWithFallback {
+<#
+.SYNOPSIS
+    Download file with proxy pool fallback
+.DESCRIPTION
+    Downloads a file with support for proxy pool rotation.
+    Retries with each proxy in the pool until one succeeds.
+#>
+function Invoke-DownloadWithFallback {
     param(
         [string]$Uri,
         [string]$OutFile,
-        [int]$TimeoutSec = 0,
-        [switch]$SkipProxy  # Skip proxy for API calls
+        [int]$TimeoutSec = 0
     )
-
-    # API calls don't use GitHub file proxies
-    if ($SkipProxy) {
-        try {
-            $params = @{ Uri = $Uri; UseBasicParsing = $true }
-            if ($TimeoutSec -gt 0) { $params['TimeoutSec'] = $TimeoutSec }
-            if ($OutFile) {
-                Invoke-WebRequest @params -OutFile $OutFile
-                return $true
-            }
-            return Invoke-RestMethod @params
-        } catch {
-            throw "请求失败: $($_.Exception.Message)"
-        }
-    }
 
     $maxAttempts = if ($proxy) { $proxyPool.Count } else { 1 }
     $attempt = 0
 
     while ($attempt -lt $maxAttempts) {
         $actualUri = Build-Url -Url $Uri
-        if ($OutFile) {
-            Write-Host "下载: $actualUri" -ForegroundColor Yellow
-        }
+        Write-Host "下载: $actualUri" -ForegroundColor $ColorInfo
         try {
-            if ($OutFile) {
-                Invoke-WebRequest -Uri $actualUri -UseBasicParsing -OutFile $OutFile
-                return $true
-            } else {
-                $params = @{ Uri = $actualUri; UseBasicParsing = $true }
-                if ($TimeoutSec -gt 0) { $params['TimeoutSec'] = $TimeoutSec }
-                return Invoke-RestMethod @params
-            }
+            Invoke-WebRequest -Uri $actualUri -UseBasicParsing -OutFile $OutFile
+            return $true
         } catch {
             $attempt++
             if ($attempt -lt $maxAttempts -and $proxy) {
                 $currentProxyIndex++
                 if ($currentProxyIndex -lt $proxyPool.Count) {
-                    Write-Host "切换代理: $($proxyPool[$currentProxyIndex])" -ForegroundColor Yellow
+                    Write-Host "切换代理: $($proxyPool[$currentProxyIndex])" -ForegroundColor $ColorWarning
                 }
             } else {
                 throw $_.Exception.Message
@@ -319,7 +322,31 @@ function Invoke-WebRequestWithFallback {
     }
 }
 
-# Helper: Normalize version format (ensure 'v' prefix for GitHub downloads)
+<#
+.SYNOPSIS
+    Call REST API (bypasses GitHub file proxies)
+.DESCRIPTION
+    Makes a REST API call directly without using GitHub file proxies.
+    Used for getting version info from npm registry or GitHub API.
+#>
+function Invoke-ApiRequest {
+    param(
+        [string]$Uri,
+        [int]$TimeoutSec = 15
+    )
+
+    try {
+        $params = @{ Uri = $Uri; UseBasicParsing = $true; TimeoutSec = $TimeoutSec }
+        return Invoke-RestMethod @params
+    } catch {
+        throw $_.Exception.Message
+    }
+}
+
+<#
+.SYNOPSIS
+    Normalize version format (ensure 'v' prefix for GitHub downloads)
+#>
 function Normalize-Version {
     param([string]$ver)
     if ($ver -notmatch '^v') {
@@ -328,20 +355,32 @@ function Normalize-Version {
     return $ver
 }
 
-# Helper: Compare semantic versions using [version] type
+<#
+.SYNOPSIS
+    Compare semantic versions using [version] type
+.DESCRIPTION
+    Compares two version strings. Strips pre-release suffixes (e.g. -beta) before comparison.
+    Returns -1, 0, or 1 for less, equal, or greater.
+#>
 function Compare-Versions {
     param([string]$v1, [string]$v2)
 
     try {
-        $v1 = [version]($v1 -replace '^v', '')
-        $v2 = [version]($v2 -replace '^v', '')
+        $v1 = [version](($v1 -replace '^v', '') -replace '-.*$', '')
+        $v2 = [version](($v2 -replace '^v', '') -replace '-.*$', '')
         return $v1.CompareTo($v2)
     } catch {
         return 0
     }
 }
 
-# Helper: Extract version number from version string
+<#
+.SYNOPSIS
+    Extract version number from version string
+.DESCRIPTION
+    Extracts the first x.y.z pattern from a version string.
+    Returns the full string if no pattern is found.
+#>
 function Extract-VersionNumber {
     param([string]$versionString)
     if ($versionString -match '(\d+\.\d+\.\d+)') {
@@ -350,31 +389,46 @@ function Extract-VersionNumber {
     return $versionString
 }
 
-# Helper: Remove cached ZIP files safely
+<#
+.SYNOPSIS
+    Remove cached ZIP files safely
+.DESCRIPTION
+    Removes cached ZIP files matching the given pattern.
+    Silently skips files that cannot be deleted.
+#>
 function Remove-CachedZips {
     param([string]$Pattern)
 
     Get-ChildItem -Path $env:TEMP -Filter $Pattern -ErrorAction SilentlyContinue |
         ForEach-Object {
-            try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch {}
+            try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { Write-Verbose "无法删除缓存文件: $($_.FullName)" }
         }
 }
 
-# Helper: Check if a file is locked
+<#
+.SYNOPSIS
+    Check if a file is locked by another process
+#>
 function Test-FileLocked {
     param([string]$FilePath)
 
     if (-not (Test-Path $FilePath)) { return $false }
 
     try {
-        [System.IO.File]::OpenWrite($FilePath).Close()
+        $fs = [System.IO.File]::Open($FilePath, 'Open', 'ReadWrite', 'None')
+        $fs.Close()
         return $false
     } catch {
         return $true
     }
 }
 
-# Helper: Validate ZIP file by checking size (simple and efficient)
+<#
+.SYNOPSIS
+    Validate ZIP file by checking size
+.DESCRIPTION
+    Checks if a ZIP file exists and is larger than 20MB (minimum valid size threshold).
+#>
 function Test-ZipValid {
     param([string]$ZipPath)
 
@@ -394,21 +448,21 @@ if (-not $userSpecifiedVersion) {
 
     # Try npm registry first (skip GitHub file proxy)
     try {
-        $response = Invoke-WebRequestWithFallback -Uri "https://registry.npmjs.org/@anthropic-ai/claude-code/latest" -TimeoutSec 15 -SkipProxy
+        $response = Invoke-ApiRequest -Uri "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
         $latestVersion = $response.version
     } catch {}
 
     # Fallback to GitHub API (skip GitHub file proxy)
     if (-not $latestVersion) {
         try {
-            $response = Invoke-WebRequestWithFallback -Uri "https://api.github.com/repos/anthropics/claude-code/releases/latest" -TimeoutSec 15 -SkipProxy
+            $response = Invoke-ApiRequest -Uri "https://api.github.com/repos/anthropics/claude-code/releases/latest"
             $latestVersion = $response.tag_name
         } catch {}
     }
 
     if (-not $latestVersion) {
         Write-Error "无法获取版本信息"
-        Write-Host "请手动指定版本: -v 'v1.0.0'" -ForegroundColor Yellow
+        Write-Host "请手动指定版本: -v 'v1.0.0'" -ForegroundColor $ColorWarning
         exit 1
     }
 
@@ -437,24 +491,24 @@ if ($currentInstalled) {
     $comparison = Compare-Versions $targetVersionNum $currentInstalled
 
     if ($comparison -eq 0) {
-        Write-Host "已是最新版本 ($currentInstalled)，无需更新" -ForegroundColor Green
+        Write-Host "已是最新版本 ($currentInstalled)，无需更新" -ForegroundColor $ColorSuccess
         exit 0
     } elseif ($comparison -lt 0) {
         # Downgrade - require user confirmation (unless -y is specified)
-        Write-Host "降级: $currentInstalled -> $targetVersionNum" -ForegroundColor Yellow
+        Write-Host "降级: $currentInstalled -> $targetVersionNum" -ForegroundColor $ColorWarning
 
         if (-not $autoConfirm) {
             $confirm = Read-Host "确认降级? (y/N)"
             if ($confirm -notin @('y', 'Y')) {
-                Write-Host "已取消" -ForegroundColor Yellow
+                Write-Host "已取消" -ForegroundColor $ColorWarning
                 exit 0
             }
         }
     } else {
-        Write-Host "升级: $currentInstalled -> $targetVersionNum" -ForegroundColor Green
+        Write-Host "升级: $currentInstalled -> $targetVersionNum" -ForegroundColor $ColorInfo
     }
 } else {
-    Write-Host "安装: $targetVersionNum" -ForegroundColor Green
+    Write-Host "安装: $targetVersionNum" -ForegroundColor $ColorInfo
 }
 
 # Build download URL (base URL without proxy prefix)
@@ -489,7 +543,7 @@ $zipPath = Join-Path $env:TEMP "claude-win32-$archSuffix-$version.zip"
 if ($validCache) {
     $skipDownload = $true
     $zipPath = $validCache.FullName
-    Write-Host "使用缓存: $zipPath" -ForegroundColor Gray
+    Write-Host "使用缓存: $zipPath" -ForegroundColor $ColorDim
 } elseif (Test-Path $zipPath) {
     try { Remove-Item $zipPath -Force -ErrorAction Stop } catch {
         $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -509,24 +563,24 @@ if (-not $skipDownload -and $proxy -and $proxyPool.Count -gt 1 -and [string]::Is
 # Download if not cached
 if (-not $skipDownload) {
     try {
-        $null = Invoke-WebRequestWithFallback -Uri $baseUrl -OutFile $zipPath
+        $null = Invoke-DownloadWithFallback -Uri $baseUrl -OutFile $zipPath
 
         # Validate downloaded ZIP file
-        $zipValid = Test-ZipValid -ZipPath $zipPath
-        if (-not $zipValid) {
-            Write-Host "下载文件损坏" -ForegroundColor Red
+        $isZipValid = Test-ZipValid -ZipPath $zipPath
+        if (-not $isZipValid) {
+            Write-Host "下载文件损坏" -ForegroundColor $ColorError
             Remove-Item $zipPath -Force
             exit 1
         }
     } catch {
-        Write-Host "下载失败: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "尝试使用代理: -p 或自定义代理: -proxy-url 'url'" -ForegroundColor Yellow
+        Write-Host "下载失败: $($_.Exception.Message)" -ForegroundColor $ColorError
+        Write-Host "尝试使用代理: -p 或自定义代理: -proxy-url 'url'" -ForegroundColor $ColorWarning
         exit 1
     }
 }
 
 # Extract
-Write-Host "解压: claude.exe..." -ForegroundColor Yellow
+Write-Host "解压: claude.exe..." -ForegroundColor $ColorInfo
 
 # Check if claude.exe is currently in use
 $fileLocked = Test-FileLocked -FilePath $claudeExe
@@ -538,14 +592,14 @@ if ($fileLocked) {
   Claude Code 当前正在运行
 ========================================
 
-无法替换正在使用中的 claude.exe。
-
-解决方案：
-  1. 关闭 Claude Code（按 Ctrl+C 或关闭终端）
-  2. 重新运行此脚本 - 将自动使用缓存文件
-
-"@ -ForegroundColor Yellow
-    exit 0
+"@ -ForegroundColor $ColorError
+    Write-Host "无法替换正在使用中的 claude.exe。" -ForegroundColor $ColorError
+    Write-Host ""
+    Write-Host "解决方案：" -ForegroundColor $ColorDim
+    Write-Host "  1. 关闭 Claude Code（按 Ctrl+C 或关闭终端）" -ForegroundColor $ColorDim
+    Write-Host "  2. 重新运行此脚本 - 将自动使用缓存文件" -ForegroundColor $ColorDim
+    Write-Host ""
+    exit 1
 }
 
 try {
@@ -562,7 +616,7 @@ try {
 
   2. 重新运行脚本重新下载
 
-"@ -ForegroundColor Red
+"@ -ForegroundColor $ColorError
     exit 1
 }
 
@@ -585,17 +639,11 @@ $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [En
 if (Test-Path $claudeExe) {
     try {
         $versionOutput = (& $claudeExe --version 2>&1 | Out-String).Trim()
-        Write-Host "完成: $versionOutput" -ForegroundColor Green
+        Write-Host "完成: $versionOutput" -ForegroundColor $ColorSuccess
     } catch {
-        Write-Host "完成: claude.exe 已安装" -ForegroundColor Green
+        Write-Host "完成: claude.exe 已安装" -ForegroundColor $ColorSuccess
     }
 } else {
     Write-Error "安装失败: 未找到 claude.exe"
     exit 1
 }
-
-
-
-
-
-
