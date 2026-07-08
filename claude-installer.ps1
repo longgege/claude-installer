@@ -62,7 +62,7 @@ Claude Code 原生版本安装器（Windows）
                               自动测试选择最快代理
     -pu, -proxy-url <字符串> 使用自定义代理 URL（跳过测速）
                               示例：-proxy-url "https://my-proxy.com/"
-    -c, -clean-npm           安装前移除旧 npm 版本
+    -c, -clean-npm           移除 npm 全局版本（可独立使用或配合安装）
     -y, -yes                 自动确认降级操作（跳过用户确认）
     -h, -help                显示此帮助信息
 
@@ -98,7 +98,7 @@ Claude Code 原生版本安装器（Windows）
     # 自动降级（跳过确认）
     .\claude-installer.ps1 -v "1.2.0" -y
 
-    # 清理 npm 版本 + 使用代理安装原生版本
+    # 移除 npm 全局版本 + 使用代理安装原生版本（组合模式）
     .\claude-installer.ps1 -p -c
 
 "@ -ForegroundColor Cyan
@@ -439,6 +439,17 @@ function Test-ZipValid {
     return $file -and $file.Length -gt 20971520
 }
 
+# Standalone mode: only clean npm version and exit
+if ($cleanNpm) {
+    $otherKeys = $PSBoundParameters.Keys | Where-Object { $_ -ne 'cleanNpm' }
+    if ($otherKeys.Count -eq 0) {
+        Write-Host "移除 npm 全局版本..." -ForegroundColor $ColorInfo
+        npm uninstall -g @anthropic-ai/claude-code 2>&1 | Out-Null
+        Write-Host "npm 全局版本已移除" -ForegroundColor $ColorSuccess
+        exit 0
+    }
+}
+
 # Determine if user specified version manually
 $userSpecifiedVersion = $version -ne "latest"
 
@@ -469,6 +480,13 @@ if (-not $userSpecifiedVersion) {
     $version = Normalize-Version $latestVersion
 } else {
     $version = Normalize-Version $version
+}
+
+# Clean npm global version (combined mode: -c + install flags)
+if ($cleanNpm) {
+    Write-Host "移除 npm 全局版本..." -ForegroundColor $ColorInfo
+    npm uninstall -g @anthropic-ai/claude-code 2>&1 | Out-Null
+    Write-Host "npm 全局版本已移除" -ForegroundColor $ColorSuccess
 }
 
 # Check current installed version
@@ -618,11 +636,6 @@ try {
 
 "@ -ForegroundColor $ColorError
     exit 1
-}
-
-# Remove old npm version (optional)
-if ($cleanNpm) {
-    npm uninstall -g @anthropic-ai/claude-code 2>&1 | Out-Null
 }
 
 # Add to PATH
