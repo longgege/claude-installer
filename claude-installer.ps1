@@ -512,16 +512,37 @@ if ($existingClaudePath) {
     }
 }
 
-# Handle winget-installed claude.exe: offer to uninstall before proceeding
+# Check for winget-installed claude.exe (even if target dir already has one)
 # Winget installs to %LOCALAPPDATA%\Microsoft\WinGet\Packages\...
-if ($existingClaudePath -and $existingClaudePath -match 'WinGet') {
+$wingetClaudePath = $null
+try {
+    # Get-Command -All returns every match on PATH, not just the first
+    $allClaude = Get-Command "claude.exe" -All -ErrorAction SilentlyContinue
+    $wingetMatch = $allClaude | Where-Object { $_.Source -match 'WinGet' } | Select-Object -First 1
+    if ($wingetMatch) { $wingetClaudePath = $wingetMatch.Source }
+} catch { }
+
+if ($wingetClaudePath) {
+    # Get winget version for display
+    $wingetVersion = $null
+    try {
+        $wingetOutput = (& $wingetClaudePath --version 2>&1 | Out-String).Trim()
+        $wingetVersion = Extract-VersionNumber $wingetOutput
+    } catch { }
+
+    $wingetIsActive = $existingClaudePath -and $existingClaudePath -match 'WinGet'
+
     Write-Host ""
     Write-Host "检测到 winget 安装的 Claude Code" -ForegroundColor $ColorWarning
-    Write-Host "  路径: $existingClaudePath" -ForegroundColor $ColorDim
-    Write-Host "  版本: $currentInstalled" -ForegroundColor $ColorDim
+    if ($wingetVersion) { Write-Host "  版本: $wingetVersion" -ForegroundColor $ColorDim }
+    Write-Host "  路径: $wingetClaudePath" -ForegroundColor $ColorDim
+    if ($existingClaudePath -and -not $wingetIsActive) {
+        Write-Host "  脚本版本: $currentInstalled ($existingClaudePath)" -ForegroundColor $ColorDim
+        Write-Host ""
+        Write-Host "⚠ 系统存在两个 claude.exe！PATH 顺序决定运行的是哪个版本。" -ForegroundColor $ColorWarning
+    }
     Write-Host ""
     Write-Host "脚本将安装到: $targetDir" -ForegroundColor $ColorInfo
-    Write-Host "继续使用 winget 版本会导致两个 claude.exe 共存的冲突。" -ForegroundColor $ColorWarning
     Write-Host ""
 
     $uninstallWinget = $autoConfirm -or ((Read-Host "是否卸载 winget 版本? (Y/n)") -ne 'n')
@@ -531,9 +552,11 @@ if ($existingClaudePath -and $existingClaudePath -match 'WinGet') {
             winget uninstall "Anthropic.ClaudeCode" 2>&1 | Out-Null
             Write-Host "winget 版本已卸载" -ForegroundColor $ColorSuccess
 
-            # Reset detection: the old path is gone, treat as fresh install
-            $existingClaudePath = $null
-            $currentInstalled = $null
+            # If winget was the detected version, reset to treat as fresh install
+            if ($wingetIsActive) {
+                $existingClaudePath = $null
+                $currentInstalled = $null
+            }
         } catch {
             Write-Host "卸载 winget 版本失败: $($_.Exception.Message)" -ForegroundColor $ColorError
             Write-Host "继续安装..." -ForegroundColor $ColorWarning
