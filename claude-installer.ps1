@@ -581,8 +581,8 @@ if ($currentInstalled) {
         Write-Host "降级: $currentInstalled -> $targetVersionNum" -ForegroundColor $ColorWarning
 
         if (-not $autoConfirm) {
-            $confirm = Read-Host "确认降级? (y/N)"
-            if ($confirm -notin @('y', 'Y')) {
+            $confirm = Read-Host "确认降级? (Y/n)"
+            if ($confirm -eq 'n' -or $confirm -eq 'N') {
                 Write-Host "已取消" -ForegroundColor $ColorWarning
                 exit 0
             }
