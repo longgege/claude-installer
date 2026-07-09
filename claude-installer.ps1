@@ -124,15 +124,15 @@ $proxyPool = @(
 )
 $currentProxyIndex = 0
 
-# Speed test timeout (milliseconds)
-$speedTestTimeout = 8000
+# Per-proxy speed test timeout (milliseconds)
+$speedTestTimeout = 1500
 
 <#
 .SYNOPSIS
-    Test proxy speed using concurrent GET requests
+    Test proxy speed using lightweight sequential GET requests
 .DESCRIPTION
-    Tests all proxies concurrently and returns the index of the fastest one.
-    Uses background jobs to measure connection latency.
+    Tests all proxies sequentially with a short timeout per proxy to avoid heavy
+    background job creation overhead. If a very fast proxy is found, it short-circuits.
 #>
 function Find-FastestProxyIndex {
     param(
@@ -143,69 +143,54 @@ function Find-FastestProxyIndex {
 
     Write-Host "测试代理速度 ($($Proxies.Count) 个代理)..." -ForegroundColor $ColorInfo
 
-    # Create background jobs for concurrent testing
-    $jobs = @()
-    $jobMap = @{}  # Map job ID to proxy index
+    $results = @()
+    # Use caller-specified per-proxy timeout (default 1500ms from caller)
+    # Sequential testing avoids Start-Job process overhead while keeping
+    # total test time bounded: proxies * perProxyTimeout
 
     for ($i = 0; $i -lt $Proxies.Count; $i++) {
         $proxy = $Proxies[$i]
         $testUri = "$proxy$TestUrl"
+        $latency = [double]::MaxValue
+        $response = $null
 
-        $job = Start-Job -ScriptBlock {
-            param($Uri, $Timeout)
-            $latency = [double]::MaxValue
-            $errorMsg = ""
-            try {
-                $timer = [System.Diagnostics.Stopwatch]::StartNew()
-                # Use GET request (HEAD may be rejected by proxies)
-                $request = [System.Net.WebRequest]::Create($Uri)
-                $request.Method = "GET"
-                $request.Timeout = $Timeout
-                $request.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                # Get response but don't read the body (just measure connection time)
-                $response = $request.GetResponse()
-                $timer.Stop()
-                $latency = $timer.ElapsedMilliseconds
-                $response.Close()
-            } catch {
-                # Timeout, connection error, or proxy rejection
-                $errorMsg = $_.Exception.Message
-            }
-            # Return hashtable for proper deserialization
-            return @{ Latency = $latency; Error = $errorMsg }
-        } -ArgumentList $testUri, $TimeoutMs
+        try {
+            $timer = [System.Diagnostics.Stopwatch]::StartNew()
+            $request = [System.Net.WebRequest]::Create($testUri)
+            $request.Method = "GET"
+            $request.Timeout = $TimeoutMs
+            $request.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+            
+            $response = $request.GetResponse()
+            $timer.Stop()
+            $latency = $timer.ElapsedMilliseconds
+        } catch {
+            # Connection failed or timed out
+        } finally {
+            if ($response) { $response.Close() }
+        }
 
-        $jobs += $job
-        $jobMap[$job.Id] = $i
-    }
-
-    # Wait for all jobs (timeout = max test timeout + buffer)
-    $null = Wait-Job -Job $jobs -Timeout ([int]($TimeoutMs / 1000) + 3)
-
-    # Collect results
-    $results = @()
-    foreach ($job in $jobs) {
-        $output = Receive-Job -Job $job -ErrorAction SilentlyContinue
-        if ($output -and $output.Latency) {
-            # Convert hashtable to PSCustomObject for proper sorting
+        if ($latency -lt [double]::MaxValue) {
             $results += [PSCustomObject]@{
-                Index = $jobMap[$job.Id]
-                Latency = $output.Latency
-                Proxy = $Proxies[$jobMap[$job.Id]]
+                Index = $i
+                Latency = $latency
+                Proxy = $proxy
+            }
+
+            # If we find a very responsive proxy (< 350ms), short-circuit immediately to save time!
+            if ($latency -lt 350) {
+                Write-Host "找到极速代理: $proxy ($($latency)ms)" -ForegroundColor $ColorSuccess
+                return $i
             }
         }
-        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
     }
 
-    # Find fastest proxy (lowest latency)
-    $validResults = $results | Where-Object { $_.Latency -lt [double]::MaxValue }
-
-    if ($validResults.Count -gt 0) {
-        $fastest = $validResults | Sort-Object -Property Latency | Select-Object -First 1
+    if ($results.Count -gt 0) {
+        $fastest = $results | Sort-Object -Property Latency | Select-Object -First 1
         Write-Host "最快代理: $($fastest.Proxy) ($($fastest.Latency)ms)" -ForegroundColor $ColorSuccess
 
         # Display all results for transparency
-        $sorted = $validResults | Sort-Object -Property Latency
+        $sorted = $results | Sort-Object -Property Latency
         $sorted | ForEach-Object {
             $color = if ($_.Proxy -eq $fastest.Proxy) { $ColorSuccess } else { $ColorDim }
             Write-Host "  $($_.Proxy): $($_.Latency)ms" -ForegroundColor $color
@@ -259,6 +244,13 @@ if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
 if ([string]::IsNullOrEmpty($targetDir)) {
     $targetDir = Join-Path $env:USERPROFILE ".local\bin"
 }
+try {
+    # Normalize path: resolve full path and strip trailing slashes to prevent duplicate PATH entries
+    $targetDir = [System.IO.Path]::GetFullPath($targetDir).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+} catch {
+    # Fallback to simple regex replace in case of invalid characters
+    $targetDir = $targetDir -replace '[\\/]+$', ''
+}
 
 # Display configuration
 Write-Host "架构: $archSuffix | 安装目录: $targetDir" -ForegroundColor $ColorInfo
@@ -291,6 +283,7 @@ function Build-Url {
 .DESCRIPTION
     Downloads a file with support for proxy pool rotation.
     Retries with each proxy in the pool until one succeeds.
+    Uses native Invoke-WebRequest progress bar for download visibility.
 #>
 function Invoke-DownloadWithFallback {
     param(
@@ -309,6 +302,20 @@ function Invoke-DownloadWithFallback {
             Invoke-WebRequest -Uri $actualUri -UseBasicParsing -OutFile $OutFile
             return $true
         } catch {
+            # Detect 404 (version not found) — don't waste time rotating proxies
+            # PS 7+ uses HttpResponseException (StatusCode property), PS 5.1 uses WebException (Response.StatusCode)
+            $is404 = $false
+            if ($null -ne $_.Exception.StatusCode -and $_.Exception.StatusCode -eq [System.Net.HttpStatusCode]::NotFound) {
+                $is404 = $true
+            } elseif ($_.Exception -is [System.Net.WebException] -and $_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
+                $is404 = $true
+            }
+            if ($is404) {
+                Write-Host "错误: 版本 $version 不存在 (HTTP 404)" -ForegroundColor $ColorError
+                Write-Host "请检查版本号，例如: -v '2.1.0'" -ForegroundColor $ColorWarning
+                exit 1
+            }
+
             $attempt++
             if ($attempt -lt $maxAttempts -and $proxy) {
                 $currentProxyIndex++
@@ -335,11 +342,16 @@ function Invoke-ApiRequest {
         [int]$TimeoutSec = 15
     )
 
+    $oldProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+
     try {
         $params = @{ Uri = $Uri; UseBasicParsing = $true; TimeoutSec = $TimeoutSec }
         return Invoke-RestMethod @params
     } catch {
         throw $_.Exception.Message
+    } finally {
+        $ProgressPreference = $oldProgress
     }
 }
 
@@ -444,7 +456,7 @@ if ($cleanNpm) {
     $otherKeys = $PSBoundParameters.Keys | Where-Object { $_ -ne 'cleanNpm' }
     if ($otherKeys.Count -eq 0) {
         Write-Host "移除 npm 全局版本..." -ForegroundColor $ColorInfo
-        npm uninstall -g @anthropic-ai/claude-code 2>&1 | Out-Null
+        $null = npm uninstall -g @anthropic-ai/claude-code 2>&1
         Write-Host "npm 全局版本已移除" -ForegroundColor $ColorSuccess
         exit 0
     }
@@ -459,9 +471,19 @@ if (-not $userSpecifiedVersion) {
 
     # Try npm registry first (skip GitHub file proxy)
     try {
-        $response = Invoke-ApiRequest -Uri "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
+        $npmRegistry = if ($proxy) { "https://registry.npmmirror.com/@anthropic-ai/claude-code/latest" } else { "https://registry.npmjs.org/@anthropic-ai/claude-code/latest" }
+        $response = Invoke-ApiRequest -Uri $npmRegistry
         $latestVersion = $response.version
     } catch {}
+
+    # Fallback to alternative npm registry if the first attempt failed
+    if (-not $latestVersion) {
+        try {
+            $fallbackNpmRegistry = if ($proxy) { "https://registry.npmjs.org/@anthropic-ai/claude-code/latest" } else { "https://registry.npmmirror.com/@anthropic-ai/claude-code/latest" }
+            $response = Invoke-ApiRequest -Uri $fallbackNpmRegistry
+            $latestVersion = $response.version
+        } catch {}
+    }
 
     # Fallback to GitHub API (skip GitHub file proxy)
     if (-not $latestVersion) {
@@ -485,7 +507,7 @@ if (-not $userSpecifiedVersion) {
 # Clean npm global version (combined mode: -c + install flags)
 if ($cleanNpm) {
     Write-Host "移除 npm 全局版本..." -ForegroundColor $ColorInfo
-    npm uninstall -g @anthropic-ai/claude-code 2>&1 | Out-Null
+    $null = npm uninstall -g @anthropic-ai/claude-code 2>&1
     Write-Host "npm 全局版本已移除" -ForegroundColor $ColorSuccess
 }
 
@@ -549,7 +571,7 @@ if ($wingetClaudePath) {
     if ($uninstallWinget) {
         try {
             Write-Host "卸载 winget 版本..." -ForegroundColor $ColorInfo
-            winget uninstall "Anthropic.ClaudeCode" 2>&1 | Out-Null
+            $null = winget uninstall "Anthropic.ClaudeCode" 2>&1
             Write-Host "winget 版本已卸载" -ForegroundColor $ColorSuccess
 
             # If winget was the detected version, reset to treat as fresh install
@@ -599,7 +621,7 @@ $baseUrl = "https://github.com/anthropics/claude-code/releases/download/$version
 
 # Create target directory
 if (-not (Test-Path $targetDir)) {
-    New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+    $null = New-Item -ItemType Directory -Path $targetDir -Force
 }
 
 # Download path in TEMP directory
